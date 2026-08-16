@@ -46,6 +46,7 @@ db/
 cert/
 pgdata/
 npm/
+acme/
 
 # Ignore Docker specific files
 docker-compose.override.yml

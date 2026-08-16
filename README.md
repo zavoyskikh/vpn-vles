@@ -1,6 +1,8 @@
 # vpn-vles
 
-Docker-развёртывание [3x-ui](https://github.com/MHSanaei/3x-ui) (панель управления Xray) с PostgreSQL и Nginx Proxy Manager.
+Docker-развёртывание [3x-ui](https://github.com/MHSanaei/3x-ui) **v3.6.0** (панель управления Xray, xray-core **v26.7.28**) с PostgreSQL и Nginx Proxy Manager.
+
+Образ панели: `ghcr.io/mhsanaei/3x-ui:v3.6.0`
 
 ## Архитектура
 
