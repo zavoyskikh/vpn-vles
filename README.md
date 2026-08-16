@@ -66,14 +66,26 @@ docker compose up -d --build
 # Создать бэкап (хранятся последние 10)
 ./scripts/backup.sh
 
-# Восстановить из архива
+# Восстановить из архива на том же сервере
 ./scripts/restore.sh backups/vpn-backup-YYYYMMDD-HHMMSS.tar.gz
 
 # Без подтверждения
 ./scripts/restore.sh -y backups/vpn-backup-YYYYMMDD-HHMMSS.tar.gz
+
+# Перенос на другой сервер (IP/sslip.io подставятся сами)
+./scripts/restore.sh -y backups/vpn-backup-YYYYMMDD-HHMMSS.tar.gz
+
+# Явно указать новый IP или домен
+./scripts/restore.sh --public-ip 203.0.113.10 backups/vpn-backup.tar.gz
+./scripts/restore.sh --domain vpn.example.com backups/vpn-backup.tar.gz
+
+# Домен не менять (только A-запись DNS), заменить IP в адресах клиентов
+./scripts/restore.sh --keep-domain backups/vpn-backup.tar.gz
 ```
 
-Бэкап включает: `docker-compose.yml`, `db/`, `cert/`, `npm/`, дамп PostgreSQL.
+Бэкап включает: `docker-compose.yml`, `db/`, `cert/`, `npm/`, дамп PostgreSQL и манифест с публичным IP/доменом.
+
+При восстановлении на другом IP скрипт обновляет `subURI`, домены Nginx Proxy Manager и пытается выпустить новый Let's Encrypt сертификат. UUID клиентов и Reality (SNI/ключи) не меняются — клиентам нужно только обновить адрес сервера или URL подписки.
 
 ### Автоматический бэкап (cron)
 

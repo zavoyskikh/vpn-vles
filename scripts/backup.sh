@@ -32,9 +32,28 @@ require_cmd() {
   command -v "$1" >/dev/null 2>&1 || die "Команда не найдена: $1"
 }
 
+detect_public_ip() {
+  local ip=""
+  ip="$(curl -4 -fsS --max-time 5 https://ifconfig.me 2>/dev/null || true)"
+  if [[ ! "${ip}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    ip="$(curl -4 -fsS --max-time 5 https://api.ipify.org 2>/dev/null || true)"
+  fi
+  if [[ ! "${ip}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
+  fi
+  printf '%s' "${ip}"
+}
+
+pg_setting() {
+  local key="$1"
+  docker exec "${POSTGRES_CONTAINER}" psql -U "${POSTGRES_USER}" -d "${POSTGRES_DB}" -tAc \
+    "SELECT COALESCE(value, '') FROM settings WHERE key = '${key}';" 2>/dev/null || true
+}
+
 require_cmd docker
 require_cmd tar
 require_cmd gzip
+require_cmd python3
 
 mkdir -p "${BACKUP_DIR}"
 log "Каталог бэкапов: ${BACKUP_DIR}"
@@ -75,23 +94,72 @@ else
   : > "${STAGING_DIR}/postgres.sql"
 fi
 
-# Manifest
-cat > "${STAGING_DIR}/manifest.json" <<EOF
-{
-  "created_at": "$(date -Iseconds)",
-  "hostname": "$(hostname)",
-  "project_dir": "${PROJECT_DIR}",
-  "postgres_container": "${POSTGRES_CONTAINER}",
-  "postgres_db": "${POSTGRES_DB}",
-  "components": [
-    "docker-compose.yml",
-    "db/",
-    "cert/",
-    "npm/",
-    "postgres.sql"
-  ]
+PUBLIC_IP="$(detect_public_ip)"
+SUB_URI=""
+WEB_DOMAIN=""
+if docker ps --format '{{.Names}}' | grep -qx "${POSTGRES_CONTAINER}"; then
+  SUB_URI="$(pg_setting subURI | tr -d '\r')"
+  WEB_DOMAIN="$(pg_setting webDomain | tr -d '\r')"
+fi
+
+NPM_SQLITE="${PROJECT_DIR}/npm/data/database.sqlite"
+PANEL_PORT="4443"
+export CREATED_AT="$(date -Iseconds)"
+export HOST_NAME="$(hostname)"
+export PUBLIC_IP SUB_URI WEB_DOMAIN NPM_SQLITE PANEL_PORT PROJECT_DIR POSTGRES_CONTAINER POSTGRES_DB
+
+python3 - "${STAGING_DIR}/manifest.json" <<'PY'
+import json, os, sqlite3, sys
+from urllib.parse import urlparse
+
+manifest_path = sys.argv[1]
+npm_domains = []
+npm_db = os.environ.get("NPM_SQLITE", "")
+if npm_db and os.path.isfile(npm_db):
+    conn = sqlite3.connect(npm_db)
+    try:
+        rows = conn.execute(
+            "SELECT domain_names FROM proxy_host WHERE COALESCE(is_deleted,0)=0 AND COALESCE(enabled,1)=1"
+        ).fetchall()
+    except sqlite3.Error:
+        rows = []
+    finally:
+        conn.close()
+    for (raw,) in rows:
+        try:
+            names = json.loads(raw or "[]")
+        except json.JSONDecodeError:
+            names = [raw]
+        npm_domains.extend(str(n) for n in names if n)
+
+sub_uri = os.environ.get("SUB_URI", "")
+panel_domain = ""
+parsed = urlparse(sub_uri)
+if parsed.hostname:
+    panel_domain = parsed.hostname
+elif npm_domains:
+    panel_domain = npm_domains[0]
+
+payload = {
+    "created_at": os.environ["CREATED_AT"],
+    "hostname": os.environ["HOST_NAME"],
+    "public_ip": os.environ.get("PUBLIC_IP", ""),
+    "panel_domain": panel_domain,
+    "panel_port": int(os.environ.get("PANEL_PORT") or 4443),
+    "sub_uri": sub_uri,
+    "web_domain": os.environ.get("WEB_DOMAIN", ""),
+    "npm_domains": npm_domains,
+    "project_dir": os.environ["PROJECT_DIR"],
+    "postgres_container": os.environ["POSTGRES_CONTAINER"],
+    "postgres_db": os.environ["POSTGRES_DB"],
+    "components": ["docker-compose.yml", "db/", "cert/", "npm/", "postgres.sql"],
 }
-EOF
+with open(manifest_path, "w", encoding="utf-8") as fh:
+    json.dump(payload, fh, ensure_ascii=False, indent=2)
+    fh.write("\n")
+PY
+
+log "Манифест записан: IP=${PUBLIC_IP:-неизвестен}"
 
 log "Архивирование в ${ARCHIVE_NAME}..."
 tar -czf "${ARCHIVE_PATH}" -C "${STAGING_DIR}" .
