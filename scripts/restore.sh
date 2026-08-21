@@ -11,6 +11,7 @@ POSTGRES_CONTAINER="3xui_postgres"
 POSTGRES_USER="xui"
 POSTGRES_DB="xui"
 NPM_CONTAINER="3xui_npm"
+XUI_CONTAINER="3xui_app"
 
 AUTO_YES=false
 ARCHIVE=""
@@ -23,6 +24,9 @@ SAME_HOST=false
 KEEP_DOMAIN=false
 SKIP_CERT=false
 SKIP_HOST_REWRITE=false
+KEEP_PASSWORD=false
+ADMIN_USER=""
+ADMIN_PASS=""
 
 usage() {
   cat <<EOF
@@ -32,6 +36,7 @@ usage() {
   - docker-compose.yml
   - db/, cert/, npm/
   - PostgreSQL (из postgres.sql)
+  - сброс пароля админа панели (логин сохраняется, 2FA сбрасывается)
 
 Если публичный IP или домен отличаются от бэкапа, скрипт переписывает:
   - subURI / subJsonURI / subClashURI / webDomain
@@ -48,6 +53,7 @@ usage() {
   --keep-domain       Оставить домен из бэкапа (только заменить IP в адресах)
   --same-host         Не переписывать IP/домен (восстановление на том же сервере)
   --skip-cert         Не запрашивать Let's Encrypt после переноса
+  --keep-password     Не сбрасывать пароль админа панели
   -h, --help          Показать справку
 
 Примеры:
@@ -81,6 +87,53 @@ confirm() {
 
 require_cmd() {
   command -v "$1" >/dev/null 2>&1 || die "Команда не найдена: $1"
+}
+
+gen_random_string() {
+  local length="$1"
+  openssl rand -base64 $((length * 2)) \
+    | tr -dc 'a-zA-Z0-9' \
+    | head -c "${length}"
+}
+
+wait_for_xui() {
+  local i
+  for i in $(seq 1 30); do
+    if docker exec "${XUI_CONTAINER}" /app/x-ui setting -show true >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 2
+  done
+  return 1
+}
+
+reset_admin_password() {
+  local user pass
+  user="$(docker exec "${POSTGRES_CONTAINER}" psql -U "${POSTGRES_USER}" -d "${POSTGRES_DB}" -Atc \
+    "SELECT username FROM users ORDER BY id ASC LIMIT 1;" 2>/dev/null || true)"
+  user="$(printf '%s' "${user}" | tr -d '[:space:]')"
+  if [ -z "${user}" ]; then
+    user="admin"
+  fi
+  pass="$(gen_random_string 18)"
+
+  log "Сброс пароля админа панели (логин: ${user})..."
+  if ! wait_for_xui; then
+    log "Предупреждение: панель не ответила, пароль не сброшен."
+    return 1
+  fi
+  if ! docker exec "${XUI_CONTAINER}" /app/x-ui setting \
+    -username "${user}" \
+    -password "${pass}" \
+    -resetTwoFactor=true >/dev/null 2>&1; then
+    log "Предупреждение: не удалось сбросить пароль админа."
+    return 1
+  fi
+  docker restart "${XUI_CONTAINER}" >/dev/null
+  wait_for_xui || true
+  ADMIN_USER="${user}"
+  ADMIN_PASS="${pass}"
+  return 0
 }
 
 detect_public_ip() {
@@ -175,17 +228,20 @@ issue_letsencrypt() {
     -d "${domain}" \
     --agree-tos --register-unsafely-without-email --non-interactive; then
     local live="/etc/letsencrypt/live/${domain}"
-    local nginx_dir="${PROJECT_DIR}/npm/data/nginx"
-    if [ -d "${nginx_dir}" ]; then
-      find "${nginx_dir}" -name '*.conf' -print0 | while IFS= read -r -d '' conf; do
-        if grep -q "server_name ${domain};" "${conf}"; then
+    # Конфиги nginx принадлежат root внутри NPM — правим через docker exec, не с хоста.
+    # В образе NPM /bin/sh = dash, поэтому bash.
+    docker exec "${NPM_CONTAINER}" bash -c '
+      domain="$1"
+      live="$2"
+      while IFS= read -r conf; do
+        if grep -q "server_name ${domain};" "$conf"; then
           sed -i \
             -e "s|ssl_certificate .*;|ssl_certificate ${live}/fullchain.pem;|" \
             -e "s|ssl_certificate_key .*;|ssl_certificate_key ${live}/privkey.pem;|" \
-            "${conf}"
+            "$conf"
         fi
-      done
-    fi
+      done < <(find /data/nginx -name "*.conf")
+    ' bash "${domain}" "${live}"
     docker exec "${NPM_CONTAINER}" nginx -s reload >/dev/null 2>&1 || \
       docker restart "${NPM_CONTAINER}" >/dev/null
     log "Сертификат выпущен: ${domain}"
@@ -221,6 +277,7 @@ while [ $# -gt 0 ]; do
     --keep-domain) KEEP_DOMAIN=true; shift ;;
     --same-host) SAME_HOST=true; SKIP_HOST_REWRITE=true; shift ;;
     --skip-cert) SKIP_CERT=true; shift ;;
+    --keep-password) KEEP_PASSWORD=true; shift ;;
     -h|--help) usage; exit 0 ;;
     -*) die "Неизвестная опция: $1" ;;
     *)
@@ -252,6 +309,7 @@ require_cmd docker
 require_cmd tar
 require_cmd python3
 require_cmd curl
+require_cmd openssl
 [ -f "${MIGRATE_HOST_PY}" ] || die "Не найден ${MIGRATE_HOST_PY}"
 
 STAGING_DIR="$(mktemp -d)"
@@ -410,6 +468,10 @@ if [ "${HOST_CHANGED}" = true ] && [ "${SKIP_CERT}" = false ] && [ "${NEW_DOMAIN
   issue_letsencrypt "${NEW_DOMAIN}"
 fi
 
+if [ "${KEEP_PASSWORD}" = false ]; then
+  reset_admin_password || true
+fi
+
 log "Готово. Проверка контейнеров:"
 docker compose ps
 
@@ -423,4 +485,11 @@ if [ "${HOST_CHANGED}" = true ]; then
   printf 'Reality dest/SNI и UUID клиентов не менялись.\n'
 else
   printf 'IP/домен не переписывались.\n'
+fi
+if [ -n "${ADMIN_USER}" ] && [ -n "${ADMIN_PASS}" ]; then
+  printf '\nЛогин панели:  %s\n' "${ADMIN_USER}"
+  printf 'Пароль панели: %s\n' "${ADMIN_PASS}"
+  printf '2FA сброшена. Сохраните пароль — в открытом виде он больше нигде не хранится.\n'
+elif [ "${KEEP_PASSWORD}" = true ]; then
+  printf '\nПароль админа не менялся (--keep-password).\n'
 fi
