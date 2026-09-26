@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
-# Вешает на интерфейс wg-exit сети из shlima/keneetic-antifilter.
+# Вешает на интерфейс wg-exit сети из routes/tunnel-ipv4.txt.
 # Запускать на этом сервере после того, как туннель поднялся.
 set -euo pipefail
 
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+LIST="${ROOT}/routes/tunnel-ipv4.txt"
 IFACE="${IFACE:-wg-exit}"
-BASE="https://raw.githubusercontent.com/shlima/keneetic-antifilter/master/routes"
-API="https://api.github.com/repos/shlima/keneetic-antifilter/contents/routes"
 
 log() { printf '[%s] %s\n' "$(date '+%H:%M:%S')" "$*"; }
 die() { printf 'Ошибка: %s\n' "$*" >&2; exit 1; }
 
 [[ "$(id -u)" -eq 0 ]] || die "Запустите от root"
+[[ -f "${LIST}" ]] || die "Нет списка ${LIST}"
 ip link show "${IFACE}" >/dev/null 2>&1 || die "Интерфейс ${IFACE} не поднят. Сначала scripts/wg-tunnel-local.sh"
 
 if ! wg show "${IFACE}" latest-handshakes | awk '{exit !($2+0 > 0)}'; then
@@ -20,36 +21,19 @@ fi
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "${tmpdir}"' EXIT
 
-log "Список файлов маршрутов"
-curl -fsSL "${API}" -o "${tmpdir}/index.json"
-python3 - "${tmpdir}/index.json" "${tmpdir}/files.txt" << 'PY'
-import json, sys
-names = [x["name"] for x in json.load(open(sys.argv[1])) if x["name"].endswith(".bat")]
-alls = sorted(n for n in names if n.startswith("all-ipv4-"))
-chosen = alls or sorted(n for n in names if n.endswith("-ipv4.bat"))
-if not chosen:
-    raise SystemExit("в репозитории нет bat-файлов")
-open(sys.argv[2], "w").write("\n".join(chosen) + "\n")
-print(len(chosen))
-PY
-
-: > "${tmpdir}/all.bat"
-while read -r name; do
-  [[ -n "${name}" ]] || continue
-  log "Качаю ${name}"
-  curl -fsSL "${BASE}/${name}" >> "${tmpdir}/all.bat"
-  printf '\n' >> "${tmpdir}/all.bat"
-done < "${tmpdir}/files.txt"
-
-python3 - "${tmpdir}/all.bat" "${tmpdir}/routes.txt" << 'PY'
+python3 - "${LIST}" "${tmpdir}/routes.txt" << 'PY'
 import ipaddress, sys
 seen = set()
 out = open(sys.argv[2], "w")
-for line in open(sys.argv[1]):
-    parts = line.split()
-    if len(parts) < 5 or parts[0] != "route" or parts[1] != "ADD":
+for lineno, raw in enumerate(open(sys.argv[1]), 1):
+    line = raw.split("#", 1)[0].strip()
+    if not line:
         continue
-    net = ipaddress.IPv4Network(f"{parts[2]}/{parts[4]}", strict=False)
+    cidr = line.split()[0]
+    try:
+        net = ipaddress.IPv4Network(cidr, strict=False)
+    except ValueError:
+        raise SystemExit(f"Строка {lineno}: неверная сеть {cidr}")
     cidr = str(net)
     if cidr in seen:
         continue

@@ -48,7 +48,13 @@ EOF
 chmod 600 "/etc/wireguard/${IFACE}.conf"
 
 sysctl -w net.ipv4.ip_forward=1 >/dev/null
-printf 'net.ipv4.ip_forward=1\n' > /etc/sysctl.d/99-wg-exit.conf
+sysctl -w net.ipv4.conf.all.rp_filter=0 >/dev/null
+sysctl -w "net.ipv4.conf.${IFACE}.rp_filter=0" >/dev/null 2>&1 || true
+cat > /etc/sysctl.d/99-wg-exit.conf <<EOF
+net.ipv4.ip_forward=1
+net.ipv4.conf.all.rp_filter=0
+net.ipv4.conf.${IFACE}.rp_filter=0
+EOF
 
 if command -v ufw >/dev/null 2>&1 && ufw status | grep -q 'Status: active'; then
   ufw allow "${WG_PORT}/udp" comment 'wg-exit' >/dev/null || true
@@ -72,6 +78,10 @@ table inet wgexit {
   }
 }
 EOF
+
+iptables -C FORWARD -i "${IFACE}" -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -i "${IFACE}" -j ACCEPT
+iptables -C FORWARD -o "${IFACE}" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -o "${IFACE}" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+iptables -t nat -C POSTROUTING -s 10.66.66.0/24 -o "${EGRESS}" -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -s 10.66.66.0/24 -o "${EGRESS}" -j MASQUERADE
 
 systemctl enable "wg-quick@${IFACE}" >/dev/null
 systemctl restart "wg-quick@${IFACE}"
