@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Выход туннеля. Запускать от root на 2a03:afc0:9::12e1.
-# Этот файл — шаблон. Готовый скрипт с ключами: scripts/generated/wg-exit-on-remote.sh
+# Шаблон выходного туннеля. На удалённый хост его не копировать.
+# Готовый файл с ключами: scripts/generated/wg-exit-on-remote.sh
 set -euo pipefail
 
 WG_PORT="${WG_PORT:-51820}"
@@ -15,7 +15,9 @@ PEER_PUB="__PEER_PUB__"
 log() { printf '[%s] %s\n' "$(date '+%H:%M:%S')" "$*"; }
 die() { printf 'Ошибка: %s\n' "$*" >&2; exit 1; }
 
-[[ "${SERVER_PRIV}" != __SERVER_PRIV__ ]] || die "Это шаблон без ключей. На удалённый хост копируйте scripts/generated/wg-exit-on-remote.sh"
+if [[ "${SERVER_PRIV}" == __* ]]; then
+  die "Это шаблон без ключей. На удалённый хост копируйте scripts/generated/wg-exit-on-remote.sh"
+fi
 [[ "$(id -u)" -eq 0 ]] || die "Запустите от root"
 
 export DEBIAN_FRONTEND=noninteractive
