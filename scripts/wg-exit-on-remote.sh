@@ -79,9 +79,21 @@ table inet wgexit {
 }
 EOF
 
-iptables -C FORWARD -i "${IFACE}" -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -i "${IFACE}" -j ACCEPT
-iptables -C FORWARD -o "${IFACE}" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -o "${IFACE}" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+# Docker держит FORWARD DROP и при перезапуске затирает чужие правила в FORWARD.
+# DOCKER-USER он не очищает, поэтому разрешение туннеля ставится туда.
+if iptables -S DOCKER-USER >/dev/null 2>&1; then
+  iptables -C DOCKER-USER -i "${IFACE}" -j ACCEPT 2>/dev/null || iptables -I DOCKER-USER 1 -i "${IFACE}" -j ACCEPT
+  iptables -C DOCKER-USER -o "${IFACE}" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || iptables -I DOCKER-USER 1 -o "${IFACE}" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+else
+  iptables -C FORWARD -i "${IFACE}" -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -i "${IFACE}" -j ACCEPT
+  iptables -C FORWARD -o "${IFACE}" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || iptables -I FORWARD 1 -o "${IFACE}" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+fi
+iptables -C INPUT -i "${IFACE}" -j ACCEPT 2>/dev/null || iptables -I INPUT 1 -i "${IFACE}" -j ACCEPT
 iptables -t nat -C POSTROUTING -s 10.66.66.0/24 -o "${EGRESS}" -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -s 10.66.66.0/24 -o "${EGRESS}" -j MASQUERADE
+if command -v ufw >/dev/null 2>&1 && ufw status | grep -q 'Status: active'; then
+  ufw route allow in on "${IFACE}" >/dev/null || true
+  ufw allow in on "${IFACE}" >/dev/null || true
+fi
 
 systemctl enable "wg-quick@${IFACE}" >/dev/null
 systemctl restart "wg-quick@${IFACE}"
