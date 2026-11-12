@@ -17,6 +17,7 @@ services:
     tty: true
     ports:
       - "443:443/tcp"
+      - "8443:8443/tcp"
     networks:
       - 3xui-network
     restart: unless-stopped

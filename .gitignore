@@ -56,3 +56,4 @@ docker-compose.override.yml
 
 # WireGuard keys and the filled remote script
 scripts/generated/
+.kilo/kilo.jsonc
